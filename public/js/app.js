@@ -561,7 +561,8 @@ async function bindDl(v) {
     });
     if (!box.querySelector('.dl')) box.innerHTML = '<p class="hint err">Aucun format téléchargeable pour cette vidéo.</p>';
   } catch (e) {
-    box.innerHTML = `<p class="hint err">Téléchargement indisponible pour cette vidéo (${esc(e.message)}).</p><p class="hint">YouTube refuse parfois les requêtes venant d’un hébergeur. Lance DjessTube en local (<code>run.bat</code>) ou indique l’adresse de ton serveur dans les Paramètres.</p>`;
+    box.innerHTML = `<p class="hint err">Formats indisponibles pour cette vidéo (${esc(e.message)}).</p>
+      <p class="hint">Réessaie dans un instant, ou lance DjessTube en local pour la qualité maximale et les autres sites (<code>run.bat</code>).</p>`;
   }
 }
 
@@ -773,6 +774,15 @@ addEventListener('online', () => toast('✅ De retour en ligne'));
 
 /* ============ démarrage ============ */
 applyTheme();
+// ?server=https://… : branche le site en ligne sur le serveur de ton PC (voir tunnel.py)
+try {
+  const p = new URLSearchParams(location.search), srv = p.get('server');
+  if (srv && /^https?:\/\//.test(srv)) {
+    S.set.dlServer = srv.replace(/\/+$/, ''); save('set');
+    history.replaceState(null, '', location.pathname + location.hash);
+    setTimeout(() => toast('🖥️ Connecté au serveur de ton PC'), 800);
+  }
+} catch { /* ignore */ }
 loadCaps().then(router);
 router();
 if ('serviceWorker' in navigator && location.protocol.startsWith('http') && location.hostname !== 'localhost') navigator.serviceWorker.register('/sw.js').catch(() => {});

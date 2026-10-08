@@ -245,8 +245,35 @@ def _player_call(vid, client):
         return json.load(r)
 
 
+def _resolve_submagic(vid):
+    """Fallback public : submagic retourne des URLs googlevideo lues depuis leur propre IP, utilisables partout."""
+    body = json.dumps({"url": f"https://youtu.be/{vid}"}).encode()
+    req = urllib.request.Request("https://submagic-free-tools.fly.dev/api/youtube-info", body,
+                                 {"Content-Type": "application/json", "Accept": "application/json", "User-Agent": UA, "Origin": "https://submagic-free-tools.fly.dev"})
+    with urllib.request.urlopen(req, timeout=20) as r:
+        d = json.load(r)
+    out = {}
+    for f in d.get("formats") or []:
+        itag = int(f.get("formatId") or 0); u = f.get("url")
+        if not itag or not u:
+            continue
+        kind = f.get("type") or ""
+        has_a = kind in ("audio", "video_with_audio")
+        has_v = kind in ("video_only", "video_with_audio")
+        mime = ("audio/" if kind == "audio" else "video/") + (f.get("ext") or "mp4")
+        if f.get("ext") == "m4a":
+            mime = "audio/mp4"
+        out[itag] = {
+            "itag": itag, "url": u, "mimeType": mime + (';codecs="avc1"' if has_v and f.get("ext") == "mp4" and has_a is False else ""),
+            "height": f.get("height"), "contentLength": None,
+            "bitrate": {140: 128000, 141: 256000, 139: 48000, 249: 50000, 250: 70000, 251: 160000}.get(itag),
+            "_type": kind,
+        }
+    return out
+
+
 def resolve(vid, fresh=False):
-    """Retourne {formats:{itag:fmt}, ua} avec des URLs directes. Plusieurs clients essayés, les formats sont fusionnés."""
+    """Retourne {formats:{itag:fmt}, ua} avec des URLs directes. Plusieurs clients essayés + fallback public."""
     if not fresh:
         hit = _cache.get(("p", vid))
         if hit and time.time() - hit[0] < 240:
@@ -259,20 +286,30 @@ def resolve(vid, fresh=False):
             reason = str(ex)
             continue
         st = r.get("streamingData") or {}
+        status = (r.get("playabilityStatus") or {}).get("status")
+        if status == "LOGIN_REQUIRED":
+            reason = "Connectez-vous pour confirmer que vous n'êtes pas un robot"
+            continue
         got = [f for f in st.get("formats", []) + st.get("adaptiveFormats", []) if f.get("url")]
         if not got:
             reason = (r.get("playabilityStatus") or {}).get("reason") or reason
             continue
         if ua is None:
             ua = c["userAgent"]
-        if c["userAgent"] != ua:  # les liens sont liés au client : on ne mélange pas
+        if c["userAgent"] != ua:
             continue
         for f in got:
             fmts.setdefault(f["itag"], f)
         if fmts.get(18) or len(fmts) > 3:
             break
     if not fmts:
-        raise RuntimeError(reason)
+        # YouTube bloque cette IP (classique sur Vercel) : on passe par submagic qui proxy depuis ses propres IPs.
+        try:
+            fmts = _resolve_submagic(vid); ua = UA
+        except Exception as ex:
+            raise RuntimeError(f"{reason} — proxy indisponible ({ex})")
+        if not fmts:
+            raise RuntimeError(reason)
     res = {"formats": fmts, "ua": ua}
     _cache[("p", vid)] = (time.time(), res)
     return res
@@ -421,5 +458,6 @@ if HAS_YTDLP:
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
+    host = os.environ.get("HOST", "127.0.0.1")  # HOST=0.0.0.0 : accessible depuis le téléphone sur le même wifi
     print(f"\n  DjessTube ({'local' if HAS_YTDLP else 'cloud'})  ->  http://localhost:{port}\n")
-    app.run(host="127.0.0.1", port=port, threaded=True)
+    app.run(host=host, port=port, threaded=True)
