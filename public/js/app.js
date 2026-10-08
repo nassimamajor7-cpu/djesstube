@@ -574,21 +574,27 @@ function newJob(v, kind, label) {
 function upd(j, p) { Object.assign(j, p); const el = document.getElementById('job-' + j.id); if (el) el.outerHTML = jobHtml(j); badge(); }
 function badge() { const n = JOBS.filter(j => j.status === 'run').length, b = $('#dlCount'); b.hidden = !n; b.textContent = n; }
 function jobHtml(j) {
-  const ico = j.kind === 'mp3' ? '🎵' : j.kind === 'm4a' ? '🎧' : '🎬';
+  const action = j.status === 'done' ? `<button class="btn sm pri" data-save="${j.id}">${I.dl} Enregistrer</button>` :
+    j.status === 'merge' ? `<button class="btn sm pri" data-merge="${j.id}">🔧 Fusionner</button>` : '';
+  const stateIco = j.status === 'done' ? '✔ Terminé' : j.status === 'merge' ? '📥 2 fichiers téléchargés' : esc(j.label);
   return `<div class="job ${j.status}" id="job-${j.id}"><img src="${esc(j.thumb)}" alt="">
     <div class="info"><b><span class="tag ${j.kind}">${j.kind.toUpperCase()}</span>${esc(j.title)}</b>
     <div class="pb"><div style="width:${Math.max(j.progress, 3)}%"></div></div>
-    <span class="${j.status === 'err' ? 'err' : ''}">${j.status === 'done' ? '✔ Terminé' : esc(j.label)}</span></div>
-    ${j.status === 'done' ? `<button class="btn sm pri" data-save="${j.id}">${I.dl} Enregistrer</button>` : ''}</div>`;
+    <span class="${j.status === 'err' ? 'err' : ''}">${stateIco}</span></div>${action}</div>`;
 }
 function renderDownloads() {
-  view.innerHTML = `<div class="sec-head" style="margin-top:0"><h2>Téléchargements</h2></div>
+  view.innerHTML = `<div class="sec-head" style="margin-top:0"><h2>Téléchargements</h2>
+    <div class="more"><button id="bMerge" title="Fusionner 2 fichiers vidéo + audio en 1 MP4">🔧 Fusionner 2 fichiers</button></div></div>
     ${JOBS.length ? JOBS.map(jobHtml).join('') : `<div class="empty"><b>⬇️</b>Aucun téléchargement pour l’instant.<br>Ouvre une vidéo et clique sur « Télécharger ».</div>`}
-    <p class="hint" style="margin-top:20px">Mode actuel : <b>${caps.download ? 'serveur (yt-dlp + ffmpeg)' : 'navigateur'}</b>${S.set.dlServer ? ` — serveur : <code>${esc(S.set.dlServer)}</code>` : ''}</p>`;
+    <p class="hint" style="margin-top:20px">Mode actuel : <b>${caps.download ? 'serveur (yt-dlp + ffmpeg)' : 'navigateur'}</b>${S.set.dlServer ? ` — serveur : <code>${esc(S.set.dlServer)}</code>` : ''}<br>
+    En mode navigateur, si Google refuse le téléchargement HD en un seul morceau depuis l’hébergeur, l’appli ouvre deux fichiers (vidéo + audio) : clique sur <b>🔧 Fusionner</b> et sélectionne-les pour obtenir un seul MP4.</p>`;
+  $('#bMerge').onclick = mergeFromDisk;
 }
 document.addEventListener('click', e => {
-  const b = e.target.closest('[data-save]'); if (!b) return;
-  const j = JOBS.find(x => x.id === b.dataset.save); if (j && j.blob) saveBlob(j.blob, j.fileName); else if (j && j.href) location.href = j.href;
+  const b = e.target.closest('[data-save]');
+  if (b) { const j = JOBS.find(x => x.id === b.dataset.save); if (j && j.blob) saveBlob(j.blob, j.fileName); else if (j && j.href) location.href = j.href; return; }
+  const m = e.target.closest('[data-merge]');
+  if (m) mergeFromDisk();
 });
 function saveBlob(blob, name) {
   const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name; document.body.appendChild(a); a.click();
@@ -681,6 +687,35 @@ function openDirect(id, itag, name, ext) {
   document.body.appendChild(a); a.click(); setTimeout(() => a.remove(), 60000);
 }
 
+/* Fusionne 2 fichiers déjà téléchargés (vidéo + audio) en 1 seul MP4 avec ffmpeg.wasm. */
+async function mergeFromDisk() {
+  return new Promise(resolve => {
+    const inp = document.createElement('input');
+    inp.type = 'file'; inp.multiple = true; inp.accept = 'video/*,audio/*,.m4a,.mp4,.webm,.mkv,.aac,.opus';
+    inp.onchange = async () => {
+      const files = [...inp.files];
+      if (files.length < 2) { toast('Sélectionne les 2 fichiers (vidéo + audio).'); resolve(); return; }
+      // Identifie vidéo et audio : par type MIME, puis par taille (la vidéo est généralement plus lourde).
+      let vf = files.find(f => f.type.startsWith('video/') || /\.(mp4|webm|mkv|mov)$/i.test(f.name));
+      let af = files.find(f => f.type.startsWith('audio/') || /\.(m4a|aac|opus|mp3|ogg)$/i.test(f.name));
+      if (!vf || !af || vf === af) { const s = [...files].sort((a, b) => b.size - a.size); vf = s[0]; af = s[1]; }
+      const name = vf.name.replace(/\s*\(?\d+p[^)]*\)?/i, '').replace(/\.[^.]+$/, '').replace(/\s*\(sans son\)|\s*\(audio\)/gi, '').trim() || 'fusion';
+      const j = newJob({ id: 'merge', title: name, thumb: 'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 9"%3E%3Crect width="16" height="9" fill="%238b5cf6"/%3E%3C/svg%3E' }, 'mp4', 'Lecture des fichiers…');
+      try {
+        upd(j, { progress: 15, label: 'Chargement du moteur de fusion…' });
+        const out = await mergeHD(vf, af, l => upd(j, { progress: 55, label: l }));
+        upd(j, { status: 'done', progress: 100, blob: out, fileName: name + '.mp4' });
+        saveBlob(out, name + '.mp4');
+        toast('✅ Fichier fusionné : ' + name.slice(0, 40));
+      } catch (e) { upd(j, { status: 'err', label: 'Erreur : ' + (e.message || e) }); toast('❌ Fusion échouée : ' + (e.message || e)); }
+      resolve();
+    };
+    inp.oncancel = () => resolve();
+    inp.click();
+  });
+}
+window.mergeFromDisk = mergeFromDisk;
+
 async function startCloudJob(v, f, kind, hd) {
   const name = clean(v.title);
   if ((kind === 'mp3') && v.duration > MAX_MP3_SEC) return toast('Trop long pour la conversion MP3 ici (> 25 min) — choisis M4A.');
@@ -707,9 +742,13 @@ async function startCloudJob(v, f, kind, hd) {
     if (e.blocked) {
       if (kind === 'm4a') { openDirect(v.id, f.audio.itag, name, 'm4a'); upd(j, { status: 'done', progress: 100, label: 'Lancé dans un nouvel onglet' }); return; }
       if (kind === 'mp4') { openDirect(v.id, 18, name, 'mp4'); upd(j, { status: 'done', progress: 100, label: 'Lancé dans un nouvel onglet' }); return; }
-      if (kind === 'hd') { openDirect(v.id, hd.itag, name + ` (${hd.height}p sans son)`, 'mp4'); openDirect(v.id, f.audio.itag, name + ' (audio)', 'm4a');
-        upd(j, { status: 'done', progress: 100, label: 'Vidéo et audio téléchargés séparément' });
-        toast('ℹ️ Hébergeur bloqué : vidéo et audio sont dans deux fichiers séparés. Combine-les ou lance DjessTube en local pour un seul fichier HD.'); return; }
+      if (kind === 'hd') {
+        openDirect(v.id, hd.itag, name + ` (${hd.height}p sans son)`, 'mp4');
+        setTimeout(() => openDirect(v.id, f.audio.itag, name + ' (audio)', 'm4a'), 500);
+        upd(j, { status: 'merge', progress: 100, label: `Attends la fin des 2 téléchargements, puis fusionne` });
+        toast('📥 Vidéo et audio en cours. Clique sur « Fusionner » dans le job quand ils sont finis.', { href: '#/downloads', label: 'Voir' });
+        return;
+      }
       // MP3 : besoin des bytes bruts pour convertir dans le navigateur, impossible en direct cross-origin.
       upd(j, { status: 'err', label: 'MP3 bloqué par Google depuis cet hébergeur. Télécharge le M4A à la place (direct), ou lance DjessTube en local.' });
       openDirect(v.id, f.audio.itag, name, 'm4a');
