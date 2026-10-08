@@ -613,14 +613,17 @@ async function startServerJob(v, kind, quality) {
 
 /* ---- mode navigateur (sans serveur) */
 async function chunk(id, itag, start) {
+  let last = '';
   for (let t = 0; t < 3; t++) {
     try {
       const r = await fetch(`/api/media?id=${id}&itag=${itag}&start=${start}`);
       if (r.ok) return { data: new Uint8Array(await r.arrayBuffer()), total: +r.headers.get('X-Total') };
-    } catch { /* retry */ }
-    await sleep(700 * (t + 1));
+      try { last = (await r.json()).error || ('HTTP ' + r.status); } catch { last = 'HTTP ' + r.status; }
+      if (r.status === 502 || /403|forbidden/i.test(last)) break; // inutile de retry : Google refuse l'IP de l'hébergeur
+    } catch (e) { last = e.message; }
+    await sleep(500 * (t + 1));
   }
-  throw new Error('le serveur a refusé le flux');
+  const err = new Error(last || 'flux refusé'); err.blocked = true; throw err;
 }
 async function fetchStream(id, itag, onP) {
   const first = await chunk(id, itag, 0), size = first.data.length, total = first.total || size;
@@ -669,11 +672,20 @@ async function mergeHD(vBlob, aBlob, onLabel) {
   const data = await ff.readFile('out.mp4'); ff.terminate();
   return new Blob([data.buffer], { type: 'video/mp4' });
 }
+function openDirect(id, itag, name, ext) {
+  // Fait suivre le redirect côté navigateur : googlevideo voit l'IP résidentielle du visiteur et accepte.
+  const a = document.createElement('a');
+  a.href = dlBase() + '/api/direct?id=' + id + '&itag=' + itag + '&t=' + Date.now();
+  a.download = `${name}.${ext}`;        // ignoré en cross-origin, mais utile si le serveur reste same-origin
+  a.target = '_blank'; a.rel = 'noopener';
+  document.body.appendChild(a); a.click(); setTimeout(() => a.remove(), 60000);
+}
+
 async function startCloudJob(v, f, kind, hd) {
+  const name = clean(v.title);
   if ((kind === 'mp3') && v.duration > MAX_MP3_SEC) return toast('Trop long pour la conversion MP3 ici (> 25 min) — choisis M4A.');
   const jk = kind === 'hd' ? 'mp4' : kind;
   const j = newJob(v, jk, 'Téléchargement…');
-  const name = clean(v.title);
   try {
     let blob, ext;
     const prog = (a, b, t) => p => upd(j, { progress: a + p * (b - a), label: `${t} ${Math.round(p * 100)}%` });
@@ -690,7 +702,22 @@ async function startCloudJob(v, f, kind, hd) {
     }
     upd(j, { status: 'done', progress: 100, blob, fileName: `${name}.${ext}` });
     saveBlob(blob, `${name}.${ext}`); toast('✅ Terminé : ' + name.slice(0, 40));
-  } catch (e) { upd(j, { status: 'err', label: 'Erreur : ' + (e.message || e) }); toast('❌ ' + (e.message || e)); }
+  } catch (e) {
+    // Si Google refuse l'IP de l'hébergeur, on bascule : le navigateur du visiteur télécharge direct.
+    if (e.blocked) {
+      if (kind === 'm4a') { openDirect(v.id, f.audio.itag, name, 'm4a'); upd(j, { status: 'done', progress: 100, label: 'Lancé dans un nouvel onglet' }); return; }
+      if (kind === 'mp4') { openDirect(v.id, 18, name, 'mp4'); upd(j, { status: 'done', progress: 100, label: 'Lancé dans un nouvel onglet' }); return; }
+      if (kind === 'hd') { openDirect(v.id, hd.itag, name + ` (${hd.height}p sans son)`, 'mp4'); openDirect(v.id, f.audio.itag, name + ' (audio)', 'm4a');
+        upd(j, { status: 'done', progress: 100, label: 'Vidéo et audio téléchargés séparément' });
+        toast('ℹ️ Hébergeur bloqué : vidéo et audio sont dans deux fichiers séparés. Combine-les ou lance DjessTube en local pour un seul fichier HD.'); return; }
+      // MP3 : besoin des bytes bruts pour convertir dans le navigateur, impossible en direct cross-origin.
+      upd(j, { status: 'err', label: 'MP3 bloqué par Google depuis cet hébergeur. Télécharge le M4A à la place (direct), ou lance DjessTube en local.' });
+      openDirect(v.id, f.audio.itag, name, 'm4a');
+      toast('ℹ️ Google bloque le MP3 depuis l’hébergeur — M4A direct lancé à la place');
+      return;
+    }
+    upd(j, { status: 'err', label: 'Erreur : ' + (e.message || e) }); toast('❌ ' + (e.message || e));
+  }
 }
 
 /* ============ modales ============ */

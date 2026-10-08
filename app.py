@@ -346,6 +346,9 @@ def formats():
 
 @app.route("/api/media")
 def media():
+    """Relaie le flux par morceaux. Utilisé pour la conversion MP3 côté navigateur, qui a besoin
+    des bytes bruts. Si l'IP du serveur est bloquée par Google (fréquent sur Vercel), ça renvoie 502
+    et le front bascule sur /api/direct pour un téléchargement direct depuis l'IP du visiteur."""
     vid, itag = request.args.get("id", ""), request.args.get("itag", type=int)
     start = max(request.args.get("start", 0, type=int), 0)
     for attempt in (0, 1):
@@ -366,6 +369,25 @@ def media():
         except Exception as ex:
             err = str(ex)
     return jsonify({"error": err}), 502
+
+
+@app.route("/api/direct")
+def direct():
+    """Résout l'URL puis renvoie une redirection 302. Le navigateur du visiteur suit le redirect
+    et télécharge le flux depuis Google avec SON IP résidentielle (que Google accepte), au lieu
+    de celle de l'hébergeur. Utilisé via <a download> ou window.open, pas via fetch (CORS)."""
+    vid, itag = request.args.get("id", ""), request.args.get("itag", type=int)
+    try:
+        res = resolve(vid)
+        f = res["formats"].get(itag)
+        if not f:
+            return jsonify({"error": "format introuvable"}), 404
+    except Exception as ex:
+        return jsonify({"error": str(ex)}), 502
+    resp = app.response_class("", status=302)
+    resp.headers["Location"] = f["url"]
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
 
 
 # ---------------------------------------------------------------- mode local : téléchargement
