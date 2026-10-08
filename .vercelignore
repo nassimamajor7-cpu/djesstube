@@ -1,0 +1,6 @@
+downloads/
+.tmp/
+.bin/
+run.bat
+requirements-local.txt
+*.log
